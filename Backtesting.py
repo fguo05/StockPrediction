@@ -4,6 +4,7 @@
 待处理：
 1.解压缩zip
 2.根据文件名确定strategy
+3.日志
 """
 import json
 from datetime import datetime
@@ -13,8 +14,9 @@ from pathlib import Path
 
 import pandas as pd
 import pymysql
-from pymysql import Error
 from pymysql.constants import CLIENT
+from pymysql import Error, InterfaceError, DatabaseError, DataError, OperationalError, \
+                    IntegrityError, InternalError, ProgrammingError, NotSupportedError
 
 
 # 配置数据库连接
@@ -36,13 +38,29 @@ BACKTESTING_PROCESSED_FOLDER = Path("data/backtesting/processed")
 
 
 def create_db_connection():
+    connection = None
     try:
         connection = pymysql.connect(**config)
         print("成功连接到阿里云RDS数据库！")
         return connection
+
+    except InterfaceError as e:
+        # 处理接口相关错误，如参数错误等
+        print(f"数据库接口错误: {e}")
+
     except Error as e:
-        print(f"连接数据库失败: {e}")
-        return None
+        # 处理连接错误
+        print(f"数据库连接错误: {e}")
+
+    except Exception as e:
+        # 处理其他非数据库错误
+        print(f"发生意外错误: {e}")
+
+    finally:
+        # 确保连接被关闭
+        if connection and connection.open:
+            connection.close()
+            print("数据库连接已关闭")
 
 
 def parse_date(date_str):
@@ -66,61 +84,63 @@ def db_log(msg):
 
 
 def insert_backtesting_data(connection, excel_data):
+    # 1.从excel获取数据
+    # 获取Performance
+    performance_data = {
+        "open_pl": excel_data['Performance']['B'][1],  # 第二行B列
+        "net_profit": excel_data['Performance']['B'][2],
+        "gross_profit": excel_data['Performance']['B'][3],
+        "gross_loss": excel_data['Performance']['B'][4],
+        "commission_paid": excel_data['Performance']['B'][5],
+        "buy_hold_return": excel_data['Performance']['B'][6],
+        "max_equity_runup": excel_data['Performance']['B'][7],
+        "max_equity_drawdown": excel_data['Performance']['B'][8],
+        "max_contracts_held": excel_data['Performance']['B'][9]
+    }
+
+    # 获取交易分析数据
+    trades_analysis_data = {
+        "total_trades": excel_data['Trades analysis']['B'][1],
+        "total_open_trades": excel_data['Trades analysis']['B'][2],
+        "winning_trades": excel_data['Trades analysis']['B'][3],
+        "losing_trades": excel_data['Trades analysis']['B'][4],
+        "percent_profitable": excel_data['Trades analysis']['B'][5],
+        "avg_pnl": excel_data['Trades analysis']['B'][6],
+        "avg_winning_trade": excel_data['Trades analysis']['B'][7],
+        "avg_losing_trade": excel_data['Trades analysis']['B'][8],
+        "ratio_avg_win_avg_loss": excel_data['Trades analysis']['B'][9],
+        "largest_winning_trade": excel_data['Trades analysis']['B'][10],
+        "largest_losing_trade": excel_data['Trades analysis']['B'][12],
+        "avg_bars_in_trades": excel_data['Trades analysis']['B'][14],
+        "avg_bars_in_winning_trades": excel_data['Trades analysis']['B'][15],
+        "avg_bars_in_losing_trades": excel_data['Trades analysis']['B'][16]
+    }
+
+    # 获取风险指标数据
+    risk_performance_data = {
+        "sharpe_ratio": excel_data['Risk performance ratios']['B'][1],
+        "sortino_ratio": excel_data['Risk performance ratios']['B'][2],
+        "profit_factor": excel_data['Risk performance ratios']['B'][3],
+        "margin_calls": excel_data['Risk performance ratios']['B'][4]
+    }
+
+    # 获取属性数据（修正字典访问方式）
+    props = {excel_data['Properties']['A'][i]: excel_data['Properties']['B'][i]
+             for i in range(len(excel_data['Properties']['A']))}
+
+    # 解析日期范围
+    trading_range = props["Trading range"].split("—")
+    trading_range_start = parse_date(trading_range[0])
+    trading_range_end = parse_date(trading_range[1])
+
+    backtesting_range = props["Backtesting range"].split("—")
+    backtesting_range_start = parse_date(backtesting_range[0])
+    backtesting_range_end = parse_date(backtesting_range[1])
+
+    start_date = parse_date(props["Start Date"])
+
+    # 2.写入数据库
     try:
-        # 获取Performance
-        performance_data = {
-            "open_pl": excel_data['Performance']['B'][1],  # 第二行B列
-            "net_profit": excel_data['Performance']['B'][2],
-            "gross_profit": excel_data['Performance']['B'][3],
-            "gross_loss": excel_data['Performance']['B'][4],
-            "commission_paid": excel_data['Performance']['B'][5],
-            "buy_hold_return": excel_data['Performance']['B'][6],
-            "max_equity_runup": excel_data['Performance']['B'][7],
-            "max_equity_drawdown": excel_data['Performance']['B'][8],
-            "max_contracts_held": excel_data['Performance']['B'][9]
-        }
-
-        # 获取交易分析数据
-        trades_analysis_data = {
-            "total_trades": excel_data['Trades analysis']['B'][1],
-            "total_open_trades": excel_data['Trades analysis']['B'][2],
-            "winning_trades": excel_data['Trades analysis']['B'][3],
-            "losing_trades": excel_data['Trades analysis']['B'][4],
-            "percent_profitable": excel_data['Trades analysis']['B'][5],
-            "avg_pnl": excel_data['Trades analysis']['B'][6],
-            "avg_winning_trade": excel_data['Trades analysis']['B'][7],
-            "avg_losing_trade": excel_data['Trades analysis']['B'][8],
-            "ratio_avg_win_avg_loss": excel_data['Trades analysis']['B'][9],
-            "largest_winning_trade": excel_data['Trades analysis']['B'][10],
-            "largest_losing_trade": excel_data['Trades analysis']['B'][12],
-            "avg_bars_in_trades": excel_data['Trades analysis']['B'][14],
-            "avg_bars_in_winning_trades": excel_data['Trades analysis']['B'][15],
-            "avg_bars_in_losing_trades": excel_data['Trades analysis']['B'][16]
-        }
-
-        # 获取风险指标数据
-        risk_performance_data = {
-            "sharpe_ratio": excel_data['Risk performance ratios']['B'][1],
-            "sortino_ratio": excel_data['Risk performance ratios']['B'][2],
-            "profit_factor": excel_data['Risk performance ratios']['B'][3],
-            "margin_calls": excel_data['Risk performance ratios']['B'][4]
-        }
-
-        # 获取属性数据（修正字典访问方式）
-        props = {excel_data['Properties']['A'][i]: excel_data['Properties']['B'][i]
-                 for i in range(len(excel_data['Properties']['A']))}
-
-        # 解析日期范围
-        trading_range = props["Trading range"].split("—")
-        trading_range_start = parse_date(trading_range[0])
-        trading_range_end = parse_date(trading_range[1])
-
-        backtesting_range = props["Backtesting range"].split("—")
-        backtesting_range_start = parse_date(backtesting_range[0])
-        backtesting_range_end = parse_date(backtesting_range[1])
-
-        start_date = parse_date(props["Start Date"])
-
         with connection.cursor() as cursor:
             # 获取ticker_id
             symbol = props["Symbol"]
@@ -181,23 +201,60 @@ def insert_backtesting_data(connection, excel_data):
 
             return backtesting_id
 
-    except Error as e:
-        print(f"Error inserting backtesting data: {e}")
+    except IntegrityError as e:
+        # 处理唯一约束、外键约束等违反完整性错误
         connection.rollback()
-        return None
+        print(f"数据完整性错误: {e}. 已回滚事务")
+
+    except DataError as e:
+        # 处理数据格式、类型等错误
+        connection.rollback()
+        print(f"数据处理错误: {e}. 已回滚事务")
+
+    except ProgrammingError as e:
+        # 处理SQL语法错误、表不存在等问题
+        connection.rollback()
+        print(f"SQL编程错误: {e}. 已回滚事务")
+
+    except OperationalError as e:
+        # 处理数据库操作错误，如连接断开等
+        connection.rollback()
+        print(f"数据库操作错误: {e}. 已回滚事务")
+
+        # 尝试重新连接
+        if 'Lost connection' in str(e):
+            print("尝试重新连接...")
+            connection = create_db_connection()
+            return insert_backtesting_data(connection, excel_data)
+
+    except InternalError as e:
+        # 处理数据库内部错误
+        connection.rollback()
+        print(f"数据库内部错误: {e}. 已回滚事务")
+
+    except NotSupportedError as e:
+        # 处理不支持的数据库特性
+        connection.rollback()
+        print(f"不支持的数据库特性: {e}. 已回滚事务")
+
+    except Error as e:
+        # 捕获其他PyMySQL错误
+        connection.rollback()
+        print(f"数据库错误: {e}. 已回滚事务")
 
 
 def insert_trade_data(connection, backtesting_id, excel_data):
+    # 1.从excel获取数据
+    trades = excel_data['List of trades']
+
+    # 预处理：将字典结构转换为更易处理的列表结构
+    trade_records = []
+    for i in range(len(trades['A'])):
+        record = {col: trades[col][i] for col in trades.keys()}
+        trade_records.append(record)
+
+    # 2.写入数据库
     try:
-        trades = excel_data['List of trades']
-        trade_entries = []
-
-        # 预处理：将字典结构转换为更易处理的列表结构
-        trade_records = []
-        for i in range(len(trades['A'])):
-            record = {col: trades[col][i] for col in trades.keys()}
-            trade_records.append(record)
-
         with connection.cursor() as cursor:
             insert_query = """
                     INSERT INTO Trade (
@@ -220,7 +277,8 @@ def insert_trade_data(connection, backtesting_id, excel_data):
                     def safe_float(val):
                         try:
                             return float(val) if val not in [None, '', 'NA'] else None
-                        except:
+                        except Exception as err:
+                            print(err)
                             return None
 
                     trade_data = (
@@ -250,10 +308,46 @@ def insert_trade_data(connection, backtesting_id, excel_data):
 
             return len(batch_data) > 0  # 返回是否插入了有效数据
 
-    except Error as e:
-        print(f"Error inserting trade data: {e}")
+    except IntegrityError as e:
+        # 处理唯一约束、外键约束等违反完整性错误
         connection.rollback()
-        return False
+        print(f"数据完整性错误: {e}. 已回滚事务")
+
+    except DataError as e:
+        # 处理数据格式、类型等错误
+        connection.rollback()
+        print(f"数据处理错误: {e}. 已回滚事务")
+
+    except ProgrammingError as e:
+        # 处理SQL语法错误、表不存在等问题
+        connection.rollback()
+        print(f"SQL编程错误: {e}. 已回滚事务")
+
+    except OperationalError as e:
+        # 处理数据库操作错误，如连接断开等
+        connection.rollback()
+        print(f"数据库操作错误: {e}. 已回滚事务")
+
+        # 尝试重新连接
+        if 'Lost connection' in str(e):
+            print("尝试重新连接...")
+            connection = create_db_connection()
+            return insert_backtesting_data(connection, excel_data)
+
+    except InternalError as e:
+        # 处理数据库内部错误
+        connection.rollback()
+        print(f"数据库内部错误: {e}. 已回滚事务")
+
+    except NotSupportedError as e:
+        # 处理不支持的数据库特性
+        connection.rollback()
+        print(f"不支持的数据库特性: {e}. 已回滚事务")
+
+    except Error as e:
+        # 捕获其他PyMySQL错误
+        connection.rollback()
+        print(f"数据库错误: {e}. 已回滚事务")
 
 
 def parse_excel(path):
