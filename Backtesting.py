@@ -1,5 +1,15 @@
+"""
+将回测excel数据批量写入数据库
+
+待处理：
+1.解压缩zip
+2.根据文件名确定strategy
+"""
 import json
 from datetime import datetime
+import os
+import shutil
+from pathlib import Path
 
 import pandas as pd
 import pymysql
@@ -18,6 +28,11 @@ config = {
     'client_flag': CLIENT.MULTI_STATEMENTS,   # 允许执行多条SQL语句
     'cursorclass': pymysql.cursors.DictCursor # 返回字典格式的结果
 }
+
+# 回测数据存放位置
+BACKTESTING_FOLDER = Path("data/backtesting")
+BACKTESTING_NEW_FOLDER = Path("data/backtesting/new")
+BACKTESTING_PROCESSED_FOLDER = Path("data/backtesting/processed")
 
 
 def create_db_connection():
@@ -254,7 +269,7 @@ def parse_excel(path):
     return excel_data
 
 
-def insert_backtesting_to_db(excel_path):
+def insert_backtesting_excel_to_db(excel_path):
     """
     将回测数据写入数据库
     :param excel_path: 回测文件路径
@@ -262,31 +277,59 @@ def insert_backtesting_to_db(excel_path):
     # 连接数据库
     connection = create_db_connection()
     if not connection:
-        return
+        return False
 
     excel_data = parse_excel(excel_path)
 
     try:
-        # 写入backtesting表（引用ticker_id）
+        # 1. 写入backtesting表（引用ticker_id）
         backtesting_id = insert_backtesting_data(connection, excel_data)
         if not backtesting_id:
             print("Failed to insert backtesting data")
             db_log(f"Backtesting data insertion failed for file: {excel_path}")
-            return
+            return False
 
-        # 写入trade表
+        # 2. 写入trade表
         success = insert_trade_data(connection, backtesting_id, excel_data)
         if not success:
             print("Failed to insert trade data")
             db_log(f"Trade insertion failed for backtesting ID: {backtesting_id}, file: {excel_path}")
-            return
+            return False
 
         print("回测数据写入成功！")
 
     finally:
         connection.close()
+        return True
+
+
+def insert_backtesting_to_db():
+    # 确保目标目录存在
+    BACKTESTING_PROCESSED_FOLDER.mkdir(parents=True, exist_ok=True)
+
+    # 获取所有Excel文件（支持xlsx、xls、csv）
+    excel_files = list(BACKTESTING_NEW_FOLDER.glob("*.[xX][lL][sS]*")) + list(BACKTESTING_NEW_FOLDER.glob("*.[cC][sS][vV]"))
+
+    if not excel_files:
+        print("没有待处理回测数据")
+        return
+
+    # 遍历处理文件
+    for file_path in excel_files:
+        try:
+            if insert_backtesting_excel_to_db(file_path): # 成功写入数据库
+                # 构建目标路径
+                dest_path = BACKTESTING_PROCESSED_FOLDER / file_path.name
+                # 移动并删除文件
+                shutil.copy2(file_path, dest_path)
+                os.remove(file_path)
+                print(f"成功删除并移动文件: {file_path.name}")
+            else: # 写入数据库失败
+                print(f"文件写入数据库失败，无法删除移动: {file_path.name}")
+        except Exception as e:
+            print(f"删除移动文件失败： {file_path.name}: {str(e)}")
+
 
 
 if __name__ == "__main__":
-    excel_path = "Custom_Signal_Strategy_OKX_BTCUSDT_2025-07-01.xlsx"
-    insert_backtesting_to_db(excel_path)
+    insert_backtesting_to_db()
