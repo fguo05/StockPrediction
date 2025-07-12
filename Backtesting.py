@@ -450,6 +450,7 @@ def insert_backtesting_excel_to_db(connection, excel_path):
 def insert_backtesting_to_db():
     """
     将回测文件目录new中的所有excel文件写入数据库，并移动到processed目录
+    :return: bool
     """
     # 1. 确保目标目录存在
     BACKTESTING_PROCESSED_FOLDER.mkdir(parents=True, exist_ok=True)
