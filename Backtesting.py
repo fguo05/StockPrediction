@@ -8,49 +8,26 @@
          但好像可以通过内部Except块打印/写日志区分具体哪里出现异常
 
 待处理：
-1.解压缩zip
-2.insert_backtesting_data中根据文件名确定strategy
-3.insert_backtesting_data中根据symbol得到exchangeticker_id
-4.日志
-5.trade_type
+- insert_backtesting_data中根据文件名确定strategy
+- insert_backtesting_data中根据symbol得到exchangeticker_id
+- 日志
+- trade_type
 """
 import json
 from datetime import datetime
-import os
-import shutil
-from pathlib import Path
 from decimal import Decimal, getcontext
 
 import pandas as pd
-import pymysql
-from pymysql.constants import CLIENT
 from pymysql import Error, InterfaceError, DatabaseError, DataError, OperationalError, \
                     IntegrityError, InternalError, ProgrammingError, NotSupportedError
-
-
-# 配置数据库连接
-config = {
-    'host': 'rm-uf6q5h4a7tkthf82cno.mysql.rds.aliyuncs.com',  # 公网地址
-    'port': 3306,                             # 端口
-    'user': 'db_user4',                       # 数据库账号
-    'password': 'Cangjie!user4',              # 数据库密码
-    'database': 'db_test1',                   # 数据库名
-    'charset': 'utf8mb4',                     # 字符编码
-    'client_flag': CLIENT.MULTI_STATEMENTS,   # 允许执行多条SQL语句
-    'cursorclass': pymysql.cursors.DictCursor # 返回字典格式的结果
-}
-
-# 回测数据存放位置
-BACKTESTING_FOLDER = Path("data/backtesting")
-BACKTESTING_NEW_FOLDER = Path("data/backtesting/new")
-BACKTESTING_PROCESSED_FOLDER = Path("data/backtesting/processed")
+from utils import *
 
 
 def create_db_connection():
     connection = None
     try:
-        connection = pymysql.connect(**config)
-        print("成功连接到阿里云RDS数据库！")
+        connection = pymysql.connect(**db_config)
+        print("成功连接到阿里云RDS数据库")
         return connection
 
     except InterfaceError as e:
@@ -106,7 +83,7 @@ def db_log(msg):
 
 def insert_backtesting_data(connection, excel_data):
     """
-    将excel数据写入backtesting表
+    将excel数据写入backtesting表，返回backtesting_id
     :param connection: 数据库连接实例
     :param excel_data: dict
     :return: backtesting_id
@@ -149,11 +126,13 @@ def insert_backtesting_data(connection, excel_data):
 
     # 获取Performance表数据
     performance_data = build_sheet_data(excel_data['Performance'])
-
     # 获取交易分析数据
     trades_analysis_data = build_sheet_data(excel_data['Trades analysis'])
     # 获取风险指标数据
     risk_performance_data = build_sheet_data(excel_data['Risk performance ratios'])
+    # print(performance_data)
+    # print(trades_analysis_data)
+    # print(risk_performance_data)
 
     # 获取属性数据
     props = {}
@@ -184,7 +163,7 @@ def insert_backtesting_data(connection, excel_data):
             cursor.execute("SELECT id FROM ExchangeTicker WHERE ticker_id = %s", (exchangeticker_id,))
             result = cursor.fetchone()
             if not result:
-                raise ValueError(f"Symbol {symbol} not found in database")
+                raise ValueError(f"Symbol {symbol} not found in database @insert_backtesting_data")
             ticker_id = result['id']
 
             # 插入回测数据
@@ -426,10 +405,13 @@ def insert_backtesting_excel_to_db(connection, excel_path):
     """
     将回测数据写入数据库
     :param excel_path: 回测文件路径
+    :return: bool
     """
+    print("开始insert_backtesting_excel_to_db")
     excel_data = parse_excel(excel_path)
 
     # 1. 写入backtesting表（引用ticker_id）
+    print("开始insert_backtesting_data")
     backtesting_id = insert_backtesting_data(connection, excel_data)
     if not backtesting_id:
         print("写入backtesting表失败！")
@@ -437,6 +419,7 @@ def insert_backtesting_excel_to_db(connection, excel_path):
         return False
 
     # 2. 写入trade表
+    print("开始insert_backtesting_data")
     success = insert_trade_data(connection, backtesting_id, excel_data)
     if not success:
         print("写入trade表失败！")
@@ -449,20 +432,25 @@ def insert_backtesting_excel_to_db(connection, excel_path):
 
 def insert_backtesting_to_db():
     """
-    将回测文件目录new中的所有excel文件写入数据库，并移动到processed目录
+    1.将待写入回测文件目录中的所有excel文件写入数据库
+    2.将文件移动到processed目录
     :return: bool
     """
-    # 1. 确保目标目录存在
-    BACKTESTING_PROCESSED_FOLDER.mkdir(parents=True, exist_ok=True)
+    print("===== 开始insert_backtesting_to_db =====")
+
+    # 1. 判断目录是否存在
+    if not (os.path.exists(BACKTESTING_PROCESSED_DIR) and os.path.exists(BACKTESTING_NEW_DIR)):
+        print("警告：文件目录不存在")
+        return False
 
     # 2. 获取所有Excel文件（支持xlsx、xls、csv）
-    excel_files = list(BACKTESTING_NEW_FOLDER.glob("*.[xX][lL][sS]*")) + list(BACKTESTING_NEW_FOLDER.glob("*.[cC][sS][vV]"))
+    files = list(BACKTESTING_NEW_DIR.glob("*.[xX][lL][sS]*")) + list(BACKTESTING_NEW_DIR.glob("*.[cC][sS][vV]"))
 
-    if not excel_files:
+    if not files:
         print("没有待处理回测数据")
-        return
+        return True
 
-    # 3. 写入数据库
+    # 3. 写入数据库+移动删除文件
     # 创建数据库连接
     connection = create_db_connection()
     if not connection:
@@ -471,14 +459,13 @@ def insert_backtesting_to_db():
     # 遍历所有待写入回测文件
     current_file = None
     try:
-        for file_path in excel_files:
+        for file_path in files:
             current_file = file_path
             if insert_backtesting_excel_to_db(connection, file_path): # 成功写入数据库
                 # 构建目标路径
-                dest_path = BACKTESTING_PROCESSED_FOLDER / file_path.name
+                dest_path = BACKTESTING_PROCESSED_DIR / file_path.name
                 # 移动并删除文件
-                shutil.copy2(file_path, dest_path)
-                os.remove(file_path)
+                shutil.move(file_path, dest_path)
                 print(f"成功移动并删除文件: {file_path.name}")
             else: # 写入数据库失败
                 print(f"文件写入数据库失败，无法移动删除: {file_path.name}")
@@ -494,7 +481,7 @@ def insert_backtesting_to_db():
     else:
         print("数据库连接异常中断！@insert_backtesting_to_db")
 
-    if os.listdir(BACKTESTING_NEW_FOLDER):
+    if os.listdir(BACKTESTING_NEW_DIR):
         print("部分回测文件写入失败！")
         return False
     print("全部回测文件写入成功！")
@@ -502,4 +489,5 @@ def insert_backtesting_to_db():
 
 
 if __name__ == "__main__":
+    # unzip_all_and_backup()
     insert_backtesting_to_db()
