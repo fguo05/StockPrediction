@@ -14,71 +14,8 @@
 - trade_type
 """
 import json
-from datetime import datetime
 from decimal import Decimal, getcontext
-
-import pandas as pd
-from pymysql import Error, InterfaceError, DatabaseError, DataError, OperationalError, \
-                    IntegrityError, InternalError, ProgrammingError, NotSupportedError
 from utils import *
-
-
-def create_db_connection():
-    connection = None
-    try:
-        connection = pymysql.connect(**db_config)
-        print("成功连接到阿里云RDS数据库")
-        return connection
-
-    except InterfaceError as e:
-        # 处理接口相关错误，如参数错误等
-        print(f"数据库接口错误: {e}")
-
-    except Error as e:
-        # 处理连接错误
-        print(f"数据库连接错误: {e}")
-
-    except Exception as e:
-        # 处理其他非数据库错误
-        print(f"连接数据库发生意外错误: {e}")
-
-
-def parse_date(date_str):
-    formats = [
-        "%b %d, %Y, %H:%M",  # Oct 10, 2022, 12:00
-        "%Y-%m-%d %H:%M:%S",  # 2022-10-10 12:00:00
-        "%m/%d/%Y %H:%M"  # 10/10/2022 12:00
-    ]
-    for fmt in formats:
-        try:
-            return datetime.strptime(date_str.strip(), fmt)
-        except ValueError:
-            continue
-    raise ValueError(f"Cannot parse date: {date_str}")
-
-
-def parse_excel(path):
-    """
-    将excel文件转成dict，其中key=sheet，每个value中key=列名A、B、C...
-    :param path: str or Path
-    :return: dict
-    """
-    excel_data = {}
-    with pd.ExcelFile(path) as xls:
-        for sheet_name in xls.sheet_names:
-            # Read each sheet and convert to dictionary
-            df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
-            # Convert to dictionary where keys are column letters and values are lists
-            excel_data[sheet_name] = {
-                chr(65 + i): df.iloc[:, i].tolist() for i in range(df.shape[1])
-            }
-    return excel_data
-
-
-def db_log(msg):
-    with open("logs/db/transactions.log", "a") as f:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        f.write(f"[{timestamp}] {msg}\n")
 
 
 def insert_backtesting_data(connection, excel_data):
