@@ -75,7 +75,7 @@ def insert_backtesting_data(connection, excel_data):
     props = {}
     properties_sheet = excel_data['Properties']
 
-    for i in range(len(properties_sheet['A'])):
+    for i in range(len(properties_sheet['A'][1:])):
         props[properties_sheet['A'][i]] = properties_sheet['B'][i]
 
     # 解析日期范围
@@ -96,7 +96,25 @@ def insert_backtesting_data(connection, excel_data):
         with connection.cursor() as cursor:
             # 获取ticker_id
             symbol = props.get("Symbol", "")
-            exchangeticker_id = ""  # 根据symbol得到exchangeticker_id
+            currency = props['Currency']
+
+            exchange, symbol = symbol.strip(currency).split(':')
+
+            cursor.execute("select id from ticker where symbol=%s", symbol)
+            ticker_id = cursor.fetchone()
+            if not ticker_id:
+                # ticker不存在怎么处理 return
+                pass
+            cursor.execute("select id from exchangeticker where ticker_id=%s", ticker_id)
+            exchangeticker_id = cursor.fetchone()
+            if not exchangeticker_id:
+                cursor.execute("select * from currency where name = %s", currency)
+                if not cursor.fetchone():
+                    cursor.execute("insert into Currency (name) values (%s)", currency)
+                cursor.execute("select * from exchange where name = %s", exchange)
+                if not cursor.fetchone():
+                    cursor.execute("insert into exchange (name) values (%s)", exchange)
+
             cursor.execute("SELECT id FROM ExchangeTicker WHERE ticker_id = %s", (exchangeticker_id,))
             result = cursor.fetchone()
             if not result:
@@ -144,7 +162,7 @@ def insert_backtesting_data(connection, excel_data):
                 json.dumps(performance_data, ensure_ascii=False),
                 json.dumps(trades_analysis_data, ensure_ascii=False),
                 json.dumps(risk_performance_data, ensure_ascii=False),
-                'Custom_Signal', # ？？？？？？？？？？？？？？？？？？？？？？？？？？
+                'strategy', # ？？？？？？？？？？？？？？？？？？？？？？？？？？
                 trading_range_start,
                 trading_range_end,
                 backtesting_range_start,
