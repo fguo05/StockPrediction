@@ -1,6 +1,10 @@
 """
 将回测excel数据批量写入数据库
 
+- insert_backtesting_to_db
+  - insert_backtesting_excel_to_db
+    - insert_backtesting_data
+    - insert_trade_data
 改动：
 - insert_backtesting_data和insert_trade_data的断开连接异常不再尝试重新连接。因为如果是trade时断开连接，会连同backtesting一起回滚（？），过于复杂，简化处理
 - create_db_connection、insert_backtesting_data、insert_trade_data、insert_backtesting_to_db是否应该抛出异常给外部函数？遇到异常就抛出？如果内部只抛出Exception，在外部详细处理各种异常，rollback在哪写？
@@ -8,17 +12,16 @@
          但好像可以通过内部Except块打印/写日志区分具体哪里出现异常
 
 待处理：
-- insert_backtesting_data中根据文件名确定strategy
-- insert_backtesting_data中根据symbol得到exchangeticker_id
+- 测试insert_backtesting_data中根据symbol得到exchangeticker_id
 - 日志
-- trade_type
 """
 import json
+import pprint
 from decimal import Decimal, getcontext
 from utils import *
 
 
-def insert_backtesting_data(connection, excel_data):
+def insert_backtesting_data(connection, excel_data, file_name):
     """
     将excel数据写入backtesting表，返回backtesting_id
     :param connection: 数据库连接实例
@@ -26,12 +29,6 @@ def insert_backtesting_data(connection, excel_data):
     :return: backtesting_id
     """
     # 1. 从excel获取数据
-    # 辅助函数：安全转换字符串
-    def safe_str(value):
-        if isinstance(value, (int, float)):
-            return str(value)
-        return str(value).strip()
-
     # 辅助函数：构建带列标签的数据字典
     def build_sheet_data(sheet_data):
         data = {}
@@ -53,7 +50,8 @@ def insert_backtesting_data(connection, excel_data):
             }
 
             for col, col_name in columns.items():
-                row_data[col_name] = sheet_data[col][row]
+                value = sheet_data[col][row]
+                row_data[col_name] = None if str(value) == "nan" else value
 
             # 使用A列的标签作为key
             key = label.lower().replace(' & ', '_and_').replace(' ', '_').replace('&', '_and_').replace('/', '_').replace('%', 'percent')
@@ -67,9 +65,12 @@ def insert_backtesting_data(connection, excel_data):
     trades_analysis_data = build_sheet_data(excel_data['Trades analysis'])
     # 获取风险指标数据
     risk_performance_data = build_sheet_data(excel_data['Risk performance ratios'])
-    # print(performance_data)
-    # print(trades_analysis_data)
-    # print(risk_performance_data)
+
+    # 获取strategy
+    i = len(file_name)-1
+    while file_name[i] != "_":
+        i -= 1
+    strategy = file_name[:i]
 
     # 获取属性数据
     props = {}
@@ -89,37 +90,58 @@ def insert_backtesting_data(connection, excel_data):
 
     trading_range_start, trading_range_end = parse_date_range(props.get("Trading range"))
     backtesting_range_start, backtesting_range_end = parse_date_range(props.get("Backtesting range"))
-    start_date = parse_date(props.get("Start Date"))
+    start_date = props.get("Start Date", "")
+    start_date = parse_date(start_date) if start_date else None
 
     # 2.写入数据库
     try:
         with connection.cursor() as cursor:
-            # 获取ticker_id
+            # 从Ticker表查ticker_id
             symbol = props.get("Symbol", "")
-            currency = props['Currency']
+            currency_name = props['Currency']
 
-            exchange, symbol = symbol.strip(currency).split(':')
+            exchange, symbol = symbol.strip(currency_name).split(':')
 
             cursor.execute("select id from ticker where symbol=%s", symbol)
             ticker_id = cursor.fetchone()
-            if not ticker_id:
-                # ticker不存在怎么处理 return
-                pass
-            cursor.execute("select id from exchangeticker where ticker_id=%s", ticker_id)
-            exchangeticker_id = cursor.fetchone()
-            if not exchangeticker_id:
-                cursor.execute("select * from currency where name = %s", currency)
-                if not cursor.fetchone():
-                    cursor.execute("insert into Currency (name) values (%s)", currency)
-                cursor.execute("select * from exchange where name = %s", exchange)
-                if not cursor.fetchone():
-                    cursor.execute("insert into exchange (name) values (%s)", exchange)
 
-            cursor.execute("SELECT id FROM ExchangeTicker WHERE ticker_id = %s", (exchangeticker_id,))
-            result = cursor.fetchone()
-            if not result:
-                raise ValueError(f"Symbol {symbol} not found in database @insert_backtesting_data")
-            ticker_id = result['id']
+            # symbol不存在ticker表,插入
+            if not ticker_id:
+                cursor.execute(f"insert into ticker (symbol) values ({symbol})")
+                ticker_id = cursor.lastrowid
+            else:
+                ticker_id = ticker_id['id']
+
+            # 从ExchangeTicker表查exchangeticker_id
+            cursor.execute(f"select id from exchangeticker where ticker_id={ticker_id}")
+            exchangeticker_id = cursor.fetchone()
+
+            # exchangeticker_id不存在
+            # 1.分别去currency、exchange表检查是否存在，不存在则插入
+            # 2.插入ExchangeTicker表
+            if not exchangeticker_id:
+                # 查currency表
+                cursor.execute("""select * from currency where name = %s""", currency_name)
+                currency_id = cursor.fetchone()
+                if not currency_id:
+                    print("currency不存在，开始插入")
+                    cursor.execute("""insert into Currency (name) values (%s)""", currency_name)
+                    currency_id = cursor.lastrowid
+                else:
+                    currency_id = currency_id['id']
+                # 查exchange表
+                cursor.execute("""select * from exchange where name = %s""", exchange)
+                exchange_id = cursor.fetchone()
+                if not exchange_id:
+                    cursor.execute("""insert into exchange (name) values (%s)""", exchange)
+                    exchange_id = cursor.lastrowid
+                else:
+                    exchange_id = exchange_id['id']
+                # 插入ExchangeTicker表
+                cursor.execute("""insert into exchangeticker (ticker_id,currency_id,exchange_id) values (%s,%s,%s)""", (ticker_id,currency_id,exchange_id))
+                ticker_id = cursor.lastrowid
+            else:
+                ticker_id = exchangeticker_id['id']
 
             # 插入回测数据
             insert_query = """
@@ -157,12 +179,15 @@ def insert_backtesting_data(connection, excel_data):
                     return default
                 return str(value).strip()
 
+            json_test = {'name':'gfn',
+                         'age':'99'}
+
             backtesting_data = (
                 ticker_id,
                 json.dumps(performance_data, ensure_ascii=False),
                 json.dumps(trades_analysis_data, ensure_ascii=False),
                 json.dumps(risk_performance_data, ensure_ascii=False),
-                'strategy', # ？？？？？？？？？？？？？？？？？？？？？？？？？？
+                strategy,
                 trading_range_start,
                 trading_range_end,
                 backtesting_range_start,
@@ -193,6 +218,7 @@ def insert_backtesting_data(connection, excel_data):
             backtesting_id = cursor.lastrowid
             connection.commit()
 
+            print("写入Backtesting表成功")
             return backtesting_id
 
     except IntegrityError as e:
@@ -243,11 +269,11 @@ def insert_trade_data(connection, backtesting_id, excel_data):
     :param excel_data: dict
     :return: bool
     """
-    # 1. 从excel获取数据（跳过第一行表头）
-    trades = excel_data['List of trades'][1:]
+    # 1. 从excel获取数据
+    trades = excel_data['List of trades']
 
     # 统计成功插入的交易记录数
-    total_insert_num = trades_num = len(trades['A'])
+    total_insert_num = total_trades = len(trades['A']) - 1
 
     # 2. 批量插入数据
     try:
@@ -268,19 +294,12 @@ def insert_trade_data(connection, backtesting_id, excel_data):
 
             # 2. 准备批量插入数据
             batch_data = []
-            for i in range(len(trades['A'])):
+            for i in range(1, len(trades['A'])):
                 try:
                     # 获取当前行数据
                     trade_num = trades['A'][i]
-                    trade_type = trades['B'][i]
+                    trade_type = trades['B'][i].lower()
 
-                    # 跳过未关闭的交易
-                    if trade_type is None or trade_type.endswith('Open'):
-                        continue
-
-                    trade_type = 'long' if 'long' in str(trade_type).lower() else 'short' # ？？？？？？？？？？
-
-                    # 修改数据准备部分
                     trade_data = (
                         backtesting_id,
                         int(trade_num),
@@ -305,12 +324,11 @@ def insert_trade_data(connection, backtesting_id, excel_data):
                     print(f"跳过格式错误的交易记录 #{trade_num}: {str(e)}")
                     total_insert_num -= 1
                     continue
-
             # 批量执行插入
             if batch_data:
                 cursor.executemany(insert_query, batch_data)
                 connection.commit()
-                print(f"成功写入 {len(total_insert_num)}/{trades_num} 条交易记录")
+                print(f"成功写入 {total_insert_num}/{total_trades} 条交易记录")
                 return True
             else:
                 print("警告：没有有效的交易记录可写入")
@@ -362,27 +380,32 @@ def insert_backtesting_excel_to_db(connection, excel_path):
     :param excel_path: 回测文件路径
     :return: bool
     """
-    print("开始insert_backtesting_excel_to_db")
-    excel_data = parse_excel(excel_path)
+    print("--开始insert_backtesting_excel_to_db--")
 
-    # 1. 写入backtesting表（引用ticker_id）
-    print("开始insert_backtesting_data")
-    backtesting_id = insert_backtesting_data(connection, excel_data)
-    if not backtesting_id:
-        print("写入backtesting表失败！")
-        db_log(f"Backtesting table insertion failed for file: {excel_path}")
-        return False
+    try:
+        excel_data = parse_excel(excel_path)
 
-    # 2. 写入trade表
-    print("开始insert_backtesting_data")
-    success = insert_trade_data(connection, backtesting_id, excel_data)
-    if not success:
-        print("写入trade表失败！")
-        db_log(f"Trade table insertion failed for backtesting ID: {backtesting_id}, file: {excel_path}")
-        return False
+        # 1. 写入backtesting表（引用ticker_id）
+        print("---开始insert_backtesting_data---")
+        backtesting_id = insert_backtesting_data(connection, excel_data, excel_path.name)
+        if not backtesting_id:
+            print("写入backtesting表失败！")
+            db_log(f"Backtesting table insertion failed for file: {excel_path}")
+            return False
 
-    print("回测数据写入成功！")
-    return True
+        # 2. 写入trade表
+        print("---开始insert_trade_data---")
+        success = insert_trade_data(connection, backtesting_id, excel_data)
+        if not success:
+            print("写入trade表失败！")
+            db_log(f"Trade table insertion failed for backtesting ID: {backtesting_id}, file: {excel_path}")
+            return False
+
+        print("回测数据写入成功：", excel_path.name)
+        return True
+
+    except Exception as e:
+        print(e)
 
 
 def insert_backtesting_to_db():
@@ -415,6 +438,7 @@ def insert_backtesting_to_db():
     current_file = None
     try:
         for file_path in files:
+            print("-正在处理%s-" % file_path.name)
             current_file = file_path
             if insert_backtesting_excel_to_db(connection, file_path): # 成功写入数据库
                 # 构建目标路径
@@ -444,5 +468,5 @@ def insert_backtesting_to_db():
 
 
 if __name__ == "__main__":
-    # unzip_all_and_backup()
+    unzip_all_and_backup()
     insert_backtesting_to_db()
